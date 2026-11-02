@@ -1,0 +1,57 @@
+# Sửa file này rồi chạy: python run_server.py.
+server:
+  host: 127.0.0.1                 # Đổi thành 0.0.0.0 nếu cần truy cập từ LAN.
+  port: 8000                      # Địa chỉ API chung, gateway cho các worker để nhận file upload và trả kết quả.
+  api_key: 123456789        # Header X-API-Key; đổi trước khi triển khai.
+  admin_key: change-admin-key     # Khóa riêng cho các địa chỉ worker.
+  upload_concurrency: 4           # Số lượng upload đồng thời trên gateway. Có 4 POST đang upload trên gateway → POST thứ 5 nhận 503 cho tới khi có slot trống.
+  upload_timeout_seconds: 60      # Thời gian tối đa cho mỗi upload
+  max_body_mb: 26                 # Giới hạn kích thước body HTTP, bao gồm file + header/boundary multipart + fields.
+  max_file_mb: 25                 # Giới hạn kích thước file upload, phải nhỏ hơn max_body_mb.
+queue:
+  max_pending: 200                # Tổng queued (file upload) + running (file processing) tối đa. 
+  poll_seconds: 0.25              # Các worker đang rảnh sẽ check queue mỗi 0.25 giây, các worker đang xử lý thì sẽ không check queue.
+  # Tổng lượt chạy khi recover job đang running sau process chết. Giá trị 2 nghĩa là lần đầu + tối đa 1lần thử lại, không phải 3 lượt.
+  max_attempts: 2                 # Crash ở attempt1 → có thể retry attempt 2; crash ở attempt 2 → failed, không có lần 3.
+  job_timeout_seconds: 300        # Thời gian tối đa cho mỗi job. Nếu job chạy quá lâu, sẽ dừng process rồi khôi phục job này lại vào queue.
+  startup_timeout_seconds: 900    # Thời gian tối đa cho mỗi worker khởi động, bao gồm load model, init worker.
+  shutdown_seconds: 15            # Thời gian đợi process dừng trước khi kill.
+  max_restarts: 5                 # Số lần restart tự động/worker/lần chạy khi gặp lỗi. Nếu quá số lần này, worker sẽ bị tắt và dừng toàn bộ queue.
+storage:
+  root: data                      # Vị trí lưu trữ file upload, file tạm, cache model, log, v.v.
+  min_free_disk_mb: 1024          # Ngưỡng trống kiểm tra trước khi lưu file upload,  đầu job, hoặc cache model. Nếu trống < ngưỡng này, sẽ báo lỗi và không lưu.
+  max_pixels: 12000000            # Chặn ảnh nguồn quá lớn trước giải mã. Số pixel=width×height trước decode toàn ảnh nguồn
+  max_edge: 1600                  # Resize ảnh làm việc để giới hạn RAM/VRAM. 4000×3000 ảnh được giảm còn1600×1200
+  max_pdf_pages: 30               # Giới hạn số trang PDF. Vượt mức thì job failed sau accepted; original vẫn được giữ.
+  max_crops_per_page: 50          # Dùng đồng thời làm YOLO max_det và giới hạn số crop chữ. Không giới hạn tổng số dòng OCR trong JSON/text.
+  retention_days: 30              # Thời gian giữ file upload, file tạm, cache model, log, v.v. trước khi xóa.
+  cleanup_dry_run: true           # true in job hết hạn mà không xóa, false và run cleanup khi server đã dừng → xóa thật.
+models:
+  yolo_path: yolo26n.pt           # Đường dẫn model YOLO. Nếu null, sẽ tải model từ internet.
+  yolo_imgsz: 640                 # Kích thước input YOLO.
+  confidence: 0.25                # Ngưỡng nhận diện YOLO.
+  ocr_lang: vi                    # Tiếng Việt.
+  ocr_version: PP-OCRv3           # API PaddleOCR 3.x, model kiến trúc v3.
+  ocr_det_dir: null               # Đường dẫn model local nếu chạy offline.
+  ocr_rec_dir: null
+  cpu_threads: 1                  # Số luồng CPU yêu cầu cho Torch/Paddle
+  max_worker_rss_mb: 8192         # Watchdog RAM/process; 0 để tắt, không phải hard limit OS.
+  min_free_gpu_mb: 512            # VRAm trống tối thiểu để load model. Nếu < ngưỡng này, sẽ báo lỗi và không load model.
+  release_cache_after_job: true   # Trả cache rảnh cho worker khác, giữ model.
+gpu_slots:
+  '0': 1                          # Tối đa 1 worker suy luận/load cùng lúc trên GPU 0. Nếu 2 worker cùng chọn GPU 0, worker thứ 2 sẽ phải chờ worker thứ 1 xong job mới chạy.
+  '1': 1
+  '2': 1
+  '3': 2                          # Tối đa 2 worker suy luận/load cùng lúc trên GPU 3.
+workers:
+  # Hai worker trên MỘT GPU; mỗi worker có URL riêng.
+  - id: worker_1                  # ID worker, dùng để phân biệt các worker trong log, queue, DB.
+    host: 127.0.0.1               # Địa chỉ worker, có thể là localhost hoặc IP LAN/WAN. Nếu worker chạy trên máy khác, cần đổi thành IP LAN/WAN của máy đó.
+    port: 9001                    # Cổng worker, có thể là bất kỳ cổng nào chưa dùng. Nếu worker chạy trên máy khác, cần đổi thành cổng worker đó.    
+    device: auto                  # cpu/gpu/auto; auto ưu tiên GPU đã chọn.
+    gpu_id: 0                     # GPU ID, chỉ dùng khi device=auto/gpu. Nếu trùng với GPU ID khác thì là có thể chay 2 worker trên cùng GPU, nhưng sẽ bị giới hạn bởi gpu_slots.
+  - id: worker_2
+    host: 127.0.0.1
+    port: 9002
+    device: auto
+    gpu_id: 0
