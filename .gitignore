@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.vscode/
+.yolo_server/
+data/
+test_outputs/
+models/
+*.pt
+requirements.lock.txt
