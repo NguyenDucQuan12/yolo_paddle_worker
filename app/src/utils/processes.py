@@ -4,7 +4,7 @@ import subprocess  # Kiểm tra timeout của process.wait.
 
 def stop_process(process, seconds):
     """
-    Dừng tiến trình, chờ xác nhận đã chết, nếu timeout thì kill.
+    Dừng tiến trình, chờ xác nhận đã chết, nếu timeout thì kill.  
     :param process: đối tượng subprocess.Popen.
     :param seconds: thời gian chờ xác nhận đã chết, nếu timeout thì kill.
     """

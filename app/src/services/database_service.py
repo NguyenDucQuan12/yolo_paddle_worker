@@ -15,9 +15,9 @@ import uuid
 import pyodbc
 
 # Mở comment 3 dòng bên dưới mỗi khi test (Chạy trực tiếp hàm if __main__)
-# import os,sys
-# PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# sys.path.append(PROJECT_DIR)
+import os,sys
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(PROJECT_DIR)
 from utils.utils import get_odbc_drivers_for_sql_server
 from utils.db_concurrency import DatabaseConcurrencyMixin
 
@@ -204,7 +204,7 @@ class MyDatabase(DatabaseConcurrencyMixin):
     Lớp quản lý kết nối đến cơ sở dữ liệu SQL Server.  
     Kế thừa DatabaseConcurrencyMixin để quản lý đồng thời nhiều thread, tránh quá tải kết nối.
     """
-    def __init__(self, server_name='localhost', database_name="Test", user_name="sa", password="123456789",
+    def __init__(self, server_name='172.16.34.250,1434', database_name="LabelSoftware", user_name="sa", password="123456789",
                  *, connect_timeout=5, query_timeout=15, trust_server_certificate=True, max_concurrent_connections=4, acquire_timeout=10):
         """
         Khởi tạo kết nối đến cơ sở dữ liệu SQL Server.
@@ -605,7 +605,7 @@ class MyDatabase(DatabaseConcurrencyMixin):
 
         rows = self._queue_call('GetJob', identity)
 
-        if not rows:
+        if not rows["data"]:
             return None
 
         return rows["data"][0]
@@ -632,7 +632,7 @@ class MyDatabase(DatabaseConcurrencyMixin):
 
     def running(self, worker_id: str) -> dict[str, Any] | None:
         """
-        Lấy ID và thời điểm bắt đầu của job worker đang chạy.
+        Lấy thông tin job mà worker đang chạy
         """
         worker_id = _queue_text(worker_id, 128, 'worker_id')
 
@@ -681,5 +681,5 @@ class MyDatabase(DatabaseConcurrencyMixin):
 if __name__ == '__main__':
     # Test kết nối và gọi procedure Settings.
     db = MyDatabase()
-    # print(db._check_connection())
+    print(db._check_connection())
     # print(db._queue_call('Settings'))
