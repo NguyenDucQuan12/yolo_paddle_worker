@@ -1,5 +1,6 @@
 # middlewares/log_requests.py
 import json, time, uuid
+import asyncio
 import socket
 from typing import Dict
 
@@ -67,7 +68,10 @@ async def log_requests(request: Request, call_next):
     # Lấy IP/hostname của client (gethostbyaddr có thể tốn thời gian nếu DNS ngược chậm)
     client_ip = get_client_ip(request= request)
     try:
-        client_hostname = socket.gethostbyaddr(client_ip)[0]
+        if path in HEALTH_PATHS or path in EXCLUDED_PATHS:
+            client_hostname = client_ip
+        else:
+            client_hostname = (await asyncio.to_thread(socket.gethostbyaddr, client_ip))[0]
     except Exception:
         client_hostname = "GUEST"
 
