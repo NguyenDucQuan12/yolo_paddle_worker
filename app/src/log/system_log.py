@@ -61,7 +61,7 @@ def _log_file_path(day_str=None):
     return os.path.join(log_dir, "system_log.log")
 
 # Logger ứng dụng (Sử dụng thread để tự tạo tệp cho ngày mới)
-system_logger = logging.getLogger("system_logger")
+system_logger = logging.getLogger()
 system_logger.setLevel(logging.INFO)
 
 

@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import tempfile
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from services.database_service import MyDatabase
@@ -59,10 +60,11 @@ def readyz(request: Request, database: MyDatabase = Depends(get_database)):
     try:
         upload_directory = Path(request.app.state.config['storage']['root']) / 'uploads_tmp'
         os.makedirs(upload_directory, exist_ok=True)
-        probe_file = os.path.join(upload_directory, ".readyz.tmp")
-        with open(probe_file, "w", encoding="utf-8") as f:
+        # Tạo một tệp tạm thời trong thư mục upload để kiểm tra quyền ghi.
+        # tempfile.NamedTemporaryFile sẽ tự động xóa tệp khi đóng.
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=upload_directory,
+                                          prefix=".readyz.", suffix=".tmp") as f:
             f.write("ok")
-        os.remove(probe_file)
         checks["fs"] = "ok"
     except Exception as e:
         checks["fs"] = f"error: {e.__class__.__name__}"
