@@ -152,37 +152,43 @@ async def log_requests(request: Request, call_next):
     # --- Đọc FULL body của response để vừa log vừa trả lại cho client ---
     content_type = response.headers.get("Content-Type", "")  # ví dụ: application/json; charset=utf-8
     body = b""
-    async for chunk in response.body_iterator:
-        # Gom toàn bộ thành bytes để khách vẫn nhận đủ dữ liệu
-        body += chunk
-
-    # Khôi phục stream body cho client: biến bytes -> iterator một phần tử
-    response.body_iterator = iterate_in_threadpool(iter([body]))
-
-    # --- Chuẩn bị nội dung 'result' đem ghi log ---
-    # Với JSON: parse và log lại ở dạng JSON đẹp (giới hạn MAX_LOG_BYTES); nếu dài, thêm 'truncated'
-    if "application/json" in content_type:
-        try:
-            preview = body[:MAX_LOG_BYTES] or b"{}"
-            log_result = json.dumps(json.loads(preview), ensure_ascii=False)
-            if len(body) > MAX_LOG_BYTES:
-                log_result += f' ... <truncated {len(body)-MAX_LOG_BYTES} bytes>'
-        except Exception:
-            # Không parse được -> log chuỗi preview
-            log_result = body[:MAX_LOG_BYTES].decode(errors="ignore")
-
-    # Với text/*: decode và giới hạn độ dài
-    elif "text" in content_type:
-        text_preview = body[:MAX_LOG_BYTES].decode(errors="ignore")
+    file_name = response.headers.get("content-disposition", "")
+    if file_name:
         log_result = (
-            text_preview
-            + (f' ... <truncated {len(body)-MAX_LOG_BYTES} bytes>' if len(body) > MAX_LOG_BYTES else "")
+            f"Content: {file_name} ; Binary data of length: "
+            f"{response.headers.get('content-length', 'unknown')}"
         )
-
-    # Nhị phân: log tên file từ header + kích thước dữ liệu
     else:
-        file_name = response.headers.get("content-disposition", "")
-        log_result = f"Content: {file_name} ; Binary data of length: {len(body)}"
+        async for chunk in response.body_iterator:
+            # Gom toàn bộ thành bytes để khách vẫn nhận đủ dữ liệu
+            body += chunk
+
+        # Khôi phục stream body cho client: biến bytes -> iterator một phần tử
+        response.body_iterator = iterate_in_threadpool(iter([body]))
+
+        # --- Chuẩn bị nội dung 'result' đem ghi log ---
+        # Với JSON: parse và log lại ở dạng JSON đẹp (giới hạn MAX_LOG_BYTES); nếu dài, thêm 'truncated'
+        if "application/json" in content_type:
+            try:
+                preview = body[:MAX_LOG_BYTES] or b"{}"
+                log_result = json.dumps(json.loads(preview), ensure_ascii=False)
+                if len(body) > MAX_LOG_BYTES:
+                    log_result += f' ... <truncated {len(body)-MAX_LOG_BYTES} bytes>'
+            except Exception:
+                # Không parse được -> log chuỗi preview
+                log_result = body[:MAX_LOG_BYTES].decode(errors="ignore")
+
+        # Với text/*: decode và giới hạn độ dài
+        elif "text" in content_type:
+            text_preview = body[:MAX_LOG_BYTES].decode(errors="ignore")
+            log_result = (
+                text_preview
+                + (f' ... <truncated {len(body)-MAX_LOG_BYTES} bytes>' if len(body) > MAX_LOG_BYTES else "")
+            )
+
+        # Nhị phân: log tên file từ header + kích thước dữ liệu
+        else:
+            log_result = f"Content: {file_name} ; Binary data of length: {len(body)}"
 
     duration_ms = (time.perf_counter() - start) * 1000
 
@@ -203,6 +209,9 @@ async def log_requests(request: Request, call_next):
             "request_body": req_body_for_log,
         },
     )
+
+    if file_name:
+        return response
 
     # Trả response FULL cho client (y hệt như handler đã tạo)
     return Response(
