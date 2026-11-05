@@ -74,31 +74,44 @@ async def log_requests(request: Request, call_next):
     # Lấy query parameters và che thông tin nhạy cảm
     params = sanitize_dict(dict(request.query_params))
 
-    # --- Đọc request body để log (nếu nhỏ & là JSON) ---
-    # Cẩn thận: sau khi đọc, PHẢI gắn lại body cho downstream qua custom receive()
-    req_body_for_log = "-"
-    try:
-        raw_body = await request.body()
-        if (
-            raw_body
-            and len(raw_body) <= MAX_LOG_BYTES
-            and "application/json" in request.headers.get("content-type", "")
-        ):
-            try:
-                # Parse JSON để log cho gọn gàng
-                req_body_for_log = json.dumps(json.loads(raw_body), ensure_ascii=False)
-            except Exception:
-                # Không parse được thì log chuỗi đã decode
-                req_body_for_log = raw_body.decode(errors="ignore")
+    # --- Thu thập request body trong giới hạn cho JSON ---
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    is_json = content_type == "application/json" or content_type.endswith("+json")
+    captured_body = bytearray()
+    request_body_too_large = False
+    request_body_complete = False
 
-        # Quan trọng: gắn lại body cho downstream, nếu không handler sẽ thấy body rỗng
-        async def receive():
-            return {"type": "http.request", "body": raw_body, "more_body": False}
+    if is_json:
+        original_receive = request.receive
 
-        request = Request(request.scope, receive)
-    except Exception:
-        # Không để lỗi logging ảnh hưởng xử lý request
-        pass
+        async def receive_with_capture():
+            nonlocal request_body_too_large, request_body_complete
+            message = await original_receive()
+            if message["type"] == "http.request":
+                chunk = message.get("body", b"")
+                if not request_body_too_large:
+                    if len(captured_body) + len(chunk) > MAX_LOG_BYTES:
+                        captured_body.clear()
+                        request_body_too_large = True
+                    else:
+                        captured_body.extend(chunk)
+                if not message.get("more_body", False):
+                    request_body_complete = True
+            return message
+
+        request = Request(request.scope, receive_with_capture)
+
+    def get_request_body_preview():
+        if not is_json or request_body_too_large or not request_body_complete or not captured_body:
+            return "-"
+
+        raw_body = bytes(captured_body)
+        try:
+            # Parse JSON để log cho gọn gàng
+            return json.dumps(json.loads(raw_body), ensure_ascii=False)
+        except Exception:
+            # Không parse được thì log chuỗi đã decode
+            return raw_body.decode(errors="ignore")
 
     # Không ghi log đối với các đường dẫn health check
     if path in HEALTH_PATHS:
@@ -143,7 +156,7 @@ async def log_requests(request: Request, call_next):
                 "duration_ms": f"{duration_ms:.2f}",
                 "user_agent": ua,
                 "correlation_id": cid,
-                "request_body": req_body_for_log,
+                "request_body": get_request_body_preview(),
             },
         )
         # Re-raise để FastAPI vẫn xử lý error pipeline (handlers/exception handlers)
@@ -200,7 +213,7 @@ async def log_requests(request: Request, call_next):
             "duration_ms": f"{duration_ms:.2f}",
             "user_agent": ua,
             "correlation_id": cid,
-            "request_body": req_body_for_log,
+            "request_body": get_request_body_preview(),
         },
     )
 
