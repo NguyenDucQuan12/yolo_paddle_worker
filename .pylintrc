@@ -1,0 +1,4 @@
+[MAIN]
+# pyodbc là module C (.pyd), Pylint mặc định không nạp nên không biết pyodbc.Error là Exception
+# → báo nhầm E0712 (catching-non-exception) / E1101 (no-member). Cho phép nạp để phân tích đúng.
+extension-pkg-allow-list=pyodbc
