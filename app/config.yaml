@@ -1,22 +1,44 @@
-# Sửa file này rồi chạy: python run_server.py.
 server:
   host: 127.0.0.1                 # Đổi thành 0.0.0.0 nếu cần truy cập từ LAN.
   port: 8000                      # Địa chỉ API chung, gateway cho các worker để nhận file upload và trả kết quả.
-  api_key: 123456789        # Header X-API-Key; đổi trước khi triển khai.
-  admin_key: change-admin-key     # Khóa riêng cho các địa chỉ worker.
+  api_key: null                   # Header X-API-Key cho /jobs trên gateway. Đặt VISION_API_KEY trong app/.env. null = tắt xác thực (chỉ dev).
+  admin_key: null                 # Header X-API-Key cho /admin và cổng worker. Đặt VISION_ADMIN_KEY trong app/.env.
+  enable_docs: true               # false để ẩn /docs, /redoc khi public.
   upload_concurrency: 4           # Số lượng upload đồng thời trên gateway. Có 4 POST đang upload trên gateway → POST thứ 5 nhận 503 cho tới khi có slot trống.
   upload_timeout_seconds: 60      # Thời gian tối đa cho mỗi upload
   max_body_mb: 26                 # Giới hạn kích thước body HTTP, bao gồm file + header/boundary multipart + fields.
   max_file_mb: 25                 # Giới hạn kích thước file upload, phải nhỏ hơn max_body_mb.
 queue:
-  max_pending: 200                # Tổng queued (file upload) + running (file processing) tối đa. 
+  max_pending: 100                # Tổng queued (file upload) + running (file processing) tối đa. 
   poll_seconds: 0.25              # Các worker đang rảnh sẽ check queue mỗi 0.25 giây, các worker đang xử lý thì sẽ không check queue.
   # Tổng lượt chạy khi recover job đang running sau process chết. Giá trị 2 nghĩa là lần đầu + tối đa 1lần thử lại, không phải 3 lượt.
-  max_attempts: 2                 # Crash ở attempt1 → có thể retry attempt 2; crash ở attempt 2 → failed, không có lần 3.
+  max_attempts: 3                 # Crash ở attempt1 → có thể retry attempt 2; crash ở attempt 2 → failed, không có lần 3.
   job_timeout_seconds: 300        # Thời gian tối đa cho mỗi job. Nếu job chạy quá lâu, sẽ dừng process rồi khôi phục job này lại vào queue.
   startup_timeout_seconds: 900    # Thời gian tối đa cho mỗi worker khởi động, bao gồm load model, init worker.
   shutdown_seconds: 15            # Thời gian đợi process dừng trước khi kill.
-  max_restarts: 5                 # Số lần restart tự động/worker/lần chạy khi gặp lỗi. Nếu quá số lần này, worker sẽ bị tắt và dừng toàn bộ queue.
+  idle_poll_max_seconds: 2        # Queue rỗng → worker giãn chu kỳ poll dần tới mức này để giảm tải SQL Server.
+  max_restarts: 5                 # Số lần restart tối đa của MỘT process trong supervisor.restart_window_seconds. Vượt → tạm ngắt process đó (circuit breaker), các process khác vẫn chạy.
+supervisor:
+  restart_backoff_initial_seconds: 2   # Chờ 2s, 4s, 8s... giữa các lần restart.
+  restart_backoff_max_seconds: 120     # Backoff tối đa.
+  restart_window_seconds: 900          # Cửa sổ đếm lỗi; chạy ổn định lâu hơn → bộ đếm tự về 0.
+  circuit_cooldown_seconds: 600        # Thời gian tạm ngắt khi vượt max_restarts, sau đó tự thử lại.
+  health_interval_seconds: 5           # Chu kỳ gọi /health của process đã ready.
+  health_timeout_seconds: 3
+  health_fail_threshold: 6             # 6 lần lỗi liên tiếp (~30s) → coi là treo và restart.
+  job_check_interval_seconds: 5        # Chu kỳ kiểm tra job quá hạn (job_timeout_seconds).
+  cleanup_interval_minutes: 60         # Chu kỳ dọn job hết hạn (retention_days); 0 = tắt.
+database:
+  server: 172.16.34.250,1434      # Có thể ghi đè bằng VISION_DB_SERVER.
+  name: LabelSoftware             # VISION_DB_NAME
+  user: sa                        # VISION_DB_USER. Nên dùng tài khoản riêng chỉ có quyền EXECUTE trên schema Queue_job, không dùng sa.
+  password: null                  # ĐẶT TRONG app/.env: VISION_DB_PASSWORD=...
+  encrypt: true
+  trust_server_certificate: true  # false khi SQL Server có chứng chỉ hợp lệ.
+  connect_timeout: 5
+  query_timeout: 15
+  max_connections: 4              # Số kết nối SQL đồng thời tối đa MỖI process.
+  deadlock_retries: 3             # Số lần thử lại khi lỗi tạm thời (deadlock, mất kết nối...).
 storage:
   root: data                      # Vị trí lưu trữ file upload, file tạm, cache model, log, v.v.
   min_free_disk_mb: 1024          # Ngưỡng trống kiểm tra trước khi lưu file upload,  đầu job, hoặc cache model. Nếu trống < ngưỡng này, sẽ báo lỗi và không lưu.
