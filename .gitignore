@@ -8,3 +8,8 @@ test_outputs/
 models/
 *.pt
 requirements.lock.txt
+
+# Secret cục bộ
+.env
+# Log runtime (đường dẫn tuyệt đối từ gốc repo để không bỏ qua package app/src/log)
+/app/log/
