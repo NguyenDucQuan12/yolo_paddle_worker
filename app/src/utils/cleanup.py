@@ -1,56 +1,75 @@
 """
-Dọn tài liệu cũ bằng python cleanup.py; mặc định dry-run, không tự xóa.
+Dọn job đã kết thúc (succeeded/failed) quá storage.retention_days.
+
+- Supervisor tự gọi định kỳ (supervisor.cleanup_interval_minutes).
+- Chạy tay:  cd app/src && python -m utils.cleanup   (an toàn cả khi server đang chạy:
+  chỉ đụng job terminal, và DeleteTerminal kiểm tra lại trạng thái trong SQL trước khi xoá).
+- storage.cleanup_dry_run=true → chỉ log job sẽ bị xoá, không xoá gì.
 """
+import logging
 import shutil
 import time
+from pathlib import Path
+
 import portalocker
-from config.config import load_config
+
 from services.database_service import MyDatabase
 
+logger = logging.getLogger(__name__)
 
-def cleanup(cfg, database : MyDatabase = None):
+
+def cleanup(cfg, database: MyDatabase, *, now=None) -> int:
     """
-    Xóa các job đã hoàn thành quá hạn; không xóa queued/running.
-    :param cfg: dict cấu hình nạp từ config.yaml.
-    :return: số job phù hợp điều kiện.
+    Xóa file + metadata của job terminal quá hạn; không đụng queued/running.
+    :return: số job phù hợp điều kiện (dry-run vẫn đếm).
     """
-    locks=cfg['storage']['root']/'locks'  # Khóa chung với supervisor/worker.
+    # Lấy đường dẫn thư mục storage, jobs, locks. Tạo thư mục locks nếu chưa có.
+    root = Path(cfg['storage']['root'])
+    jobs_root = (root / 'jobs').resolve()
+    locks = root / 'locks'
+    locks.mkdir(parents=True, exist_ok=True)
+    dry_run = bool(cfg['storage']['cleanup_dry_run'])
 
-    # Tạo folder locks nếu chưa có, tránh lỗi khi chạy lần đầu.
-    locks.mkdir(exist_ok=True)
-    # Tính thời gian cutoff để xóa job đã hoàn thành quá hạn. Là thời gian hiện tại trừ đi retention_days (ngày lưu trữ) * 86400 (số giây trong 1 ngày).
-    cutoff=time.time()-cfg['storage']['retention_days']*86400
+    # Tính thời điểm cắt (cutoff) dựa trên retention_days. Job kết thúc trước thời điểm này sẽ bị xoá.
+    cutoff = (now or time.time()) - cfg['storage']['retention_days'] * 86400
 
-    # Dùng portalocker để tránh xung đột với server đang chạy. Nếu server đang chạy, sẽ không dọn.
-    with portalocker.Lock(locks/'supervisor.lock',mode='a',timeout=0):
-        # Dùng lock để tránh xung đột với các child process còn sống. Nếu có child còn sống, sẽ không dọn.
-        with portalocker.Lock(locks/'children.alive.lock',mode='a',timeout=0):
+    try:
+        lock = portalocker.Lock(locks / 'cleanup.lock', mode='a', timeout=0)
+        lock.acquire()
+    except portalocker.exceptions.LockException:
+        logger.info('Một tiến trình cleanup khác đang chạy; bỏ qua lượt này')
+        return 0
 
-            rows=database.expired(cutoff)
-            if not rows:  # Không có job nào phù hợp điều kiện.
-                return 0  # Không có job nào phù hợp điều kiện.
+    try:
+        rows = database.expired(cutoff)
+        for row in rows:
+            job_id = row['id']
+            if dry_run:
+                logger.info('[DRY-RUN] Job hết hạn sẽ bị xoá: %s (%s, kết thúc %s)',
+                            job_id, row.get('status'), row.get('finished'))
+                continue
 
-            # Dọn job đã hoàn thành quá hạn.
-            for row in rows:  # Mỗi job có một folder chứa original và mọi attempt.
-                print(dict(row),'DRY-RUN' if cfg['storage']['cleanup_dry_run'] else 'DELETE')  # Hiển thị chính xác job bị tác động.
-
-                # Nếu dry-run, chỉ in ra thông tin mà không xóa gì cả.
-                if cfg['storage']['cleanup_dry_run']:
-                    continue
-
-                # Xác định folder của job dựa trên ID, đảm bảo không xóa ra ngoài storage.
-                folder=(cfg['storage']['root']/'jobs'/row['id']).resolve()
-                # Chặn xóa ra ngoài storage.
-                if not folder.is_relative_to((cfg['storage']['root']/'jobs').resolve()):  # Chặn metadata bị sửa dẫn ra ngoài storage.
-                    raise ValueError('Unsafe job path')
-                
+            folder = (jobs_root / job_id).resolve()
+            if not folder.is_relative_to(jobs_root) or folder == jobs_root:
+                logger.error('Bỏ qua job %s: đường dẫn không an toàn', job_id)
+                continue
+            try:
                 if folder.exists():
-                    shutil.rmtree(folder)  # Xóa cả original, crops, text và attempts của job hết hạn.
+                    shutil.rmtree(folder)
+            except OSError as exc:
+                # Giữ metadata để lượt sau thử lại; không để một file bị khoá chặn cả quá trình.
+                logger.warning('Không xoá được thư mục job %s: %s', job_id, exc)
+                continue
+            database.delete_terminal(job_id, cutoff)
+            logger.info('Đã xoá job hết hạn %s', job_id)
+        return len(rows)
+    finally:
+        lock.release()
 
-                # Xóa metadata của job khỏi cơ sở dữ liệu, chỉ xóa nếu folder đã xóa thành công.
-                database.delete_terminal(row['id'], cutoff)
 
-            return len(rows)
+if __name__ == '__main__':
+    from config.config import load_config
 
-if __name__=='__main__':  # Không tự dọn lúc server import module.
-    print('Matched jobs:',cleanup(load_config()))  # Không truyền argument; cấu hình ở YAML.
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    config = load_config()
+    print('Matched jobs:', cleanup(config, MyDatabase.from_config(config)))

@@ -2,8 +2,8 @@
 server:
   host: 127.0.0.1
   port: 8000
-  api_key: change-this-key
-  admin_key: change-admin-key
+  api_key: null            # Đặt VISION_API_KEY trong app/.env
+  admin_key: null          # Đặt VISION_ADMIN_KEY trong app/.env
   upload_concurrency: 4
   upload_timeout_seconds: 60
   max_body_mb: 26
@@ -63,3 +63,9 @@ workers:
   port: 9004
   device: gpu
   gpu_id: 3
+database:
+  server: 172.16.34.250,1434
+  name: LabelSoftware
+  user: sa
+  password: null            # Đặt VISION_DB_PASSWORD trong app/.env
+# Các section supervisor/... không ghi sẽ dùng mặc định trong src/config/config.py

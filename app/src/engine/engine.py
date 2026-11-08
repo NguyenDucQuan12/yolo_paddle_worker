@@ -2,7 +2,6 @@
 Xử lý các công việc liên quan đến inference YOLO và PaddleOCR, bao gồm nạp model, xử lý ảnh/PDF, lưu kết quả metadata và ảnh crop.
 """
 from contextlib import closing
-import json
 import math
 import os
 import time
@@ -16,35 +15,16 @@ import pypdfium2 as pdfium
 import torch
 import paddle
 
-# Thiết lập biến môi trường để vô hiệu hóa kiểm tra nguồn model của PaddleOCR và thay đổi đường dẫn lưu trữ model để sử dụng nội bộ.
-os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "true"
-os.environ["PADDLE_PDX_CACHE_HOME"] = r"models" # Thay đổi đường dẫn lưu trữ model để dùng nội bộ
+# Vô hiệu hóa kiểm tra nguồn model của PaddleX. Đặt TRƯỚC khi import paddleocr.
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "true")
+os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(Path(__file__).resolve().parents[2] / "models"))
 from ultralytics import YOLO
 from paddleocr import PaddleOCRVL
 from utils.resources import check_disk, release_cache
+from utils.files import write_json  # noqa: F401  (giữ để `from engine.engine import write_json` cũ vẫn chạy)
+from engine.errors import InputError
 
 logger = logging.getLogger(__name__)
-
-def write_json(path: Path, value):
-    """
-    Ghi dict hoặc list ra file JSON an toàn, thông qua file tạm 
-    path phải là Path object, không phải str, để with_suffix() hoạt động đúng  
-    Ví dụ: path=Path('data/result.json')
-    """
-    # Lấy đường dẫn file đích và tạo file tạm với hậu tố .tmp
-    temp = path.with_suffix(path.suffix + '.tmp')   # data/result.json.tmp
-
-    # mode 'w' (ghi) và encoding UTF-8. Nếu file tạm đã tồn tại, nó sẽ bị ghi đè.
-    with temp.open('w', encoding='utf-8') as stream:
-        # Chuyển thành JSON với indent=2 thụt vào 2 khoảng trắng để dễ đọc
-        json.dump(value, stream, ensure_ascii=False, indent=2)
-        # Đẩy dữ liệu từ bộ đệm Python xuống hệ thống file
-        stream.flush()
-        # Yêu cầu hệ điều hành ghi dữ liệu từ bộ đệm của hệ thống xuống đĩa
-        os.fsync(stream.fileno())
-
-    # Thay thế file gốc bằng file tạm. Nếu crash giữa chừng, file gốc vẫn còn nguyên.
-    temp.replace(path)
 
 def image_pages(source: Path, cfg: dict):
     """
@@ -59,10 +39,18 @@ def image_pages(source: Path, cfg: dict):
         is_pdf = b'%PDF-' in stream.read(1024)
 
     if is_pdf:
-        with closing(pdfium.PdfDocument(source)) as document:
+        try:
+            document = pdfium.PdfDocument(source)
+        except pdfium.PdfiumError as exc:
+            raise InputError('File PDF bị hỏng, có mật khẩu hoặc không đọc được') from exc
+
+        with closing(document):
+            total_pages = len(document)
             # Kiểm tra PDF có ít nhất một trang và không vượt số trang cho phép.
-            if not 1 <= len(document) <= settings['max_pdf_pages']:
-                raise ValueError('PDF vượt giới hạn số trang hoặc không có trang')
+            if total_pages < 1:
+                raise InputError('PDF không có trang nào')
+            if total_pages > settings['max_pdf_pages']:
+                raise InputError(f'PDF có {total_pages} trang, vượt giới hạn {settings["max_pdf_pages"]} trang')
 
             for index, page in enumerate(document):
                 # Bitmap là ảnh RGB với kích thước được scale theo max_edge và max_pixels.
@@ -73,7 +61,7 @@ def image_pages(source: Path, cfg: dict):
 
                     # Nếu kích thước trang PDF không hợp lệ
                     if not all(math.isfinite(v) and v > 0 for v in (width, height)):
-                        raise ValueError('Kích thước trang PDF không hợp lệ')
+                        raise InputError(f'Kích thước trang PDF {index + 1} không hợp lệ')
 
                     # Tính tỉ lệ render để đáp ứng 2 giới hạn: max_edge (cạnh dài nhất) và max_pixels (tổng số pixel). scale sẽ là min giữa 2 giới hạn này.
                     scale = min(
@@ -88,7 +76,7 @@ def image_pages(source: Path, cfg: dict):
 
                     try:
                         # yield ảnh RGB để xử lý tiếp
-                        yield image, {'page': index+1, 'pdf_size_points': [width, height]}
+                        yield image, {'page': index+1, 'total_pages': total_pages, 'pdf_size_points': [width, height]}
                     finally:
                         image.close()
                 finally:
@@ -102,15 +90,21 @@ def image_pages(source: Path, cfg: dict):
             # Thiết lập cảnh báo DecompressionBombWarning thành lỗi để tránh mở các ảnh có số pixel quá lớn.
             warnings.simplefilter('error', Image.DecompressionBombWarning)
 
-            # Mở file ảnh
-            with Image.open(source) as original:
+            # Mở file ảnh. File không phải ảnh / "bom giải nén" → lỗi đầu vào, không phải lỗi server.
+            try:
+                original = Image.open(source)
+            except (Image.UnidentifiedImageError, Image.DecompressionBombError,
+                    Image.DecompressionBombWarning) as exc:
+                raise InputError('Chỉ nhận JPEG, PNG, WebP tĩnh hoặc PDF') from exc
+
+            with original:
                 # Ảnh có định dạng ảnh hợp lệ và chỉ có 1 frame (không phải ảnh động)
                 if original.format not in {'JPEG', 'PNG', 'WEBP'} or getattr(original, 'n_frames', 1) != 1:
-                    raise ValueError('Chỉ nhận JPEG, PNG, WebP tĩnh hoặc PDF')
+                    raise InputError('Chỉ nhận JPEG, PNG, WebP tĩnh hoặc PDF')
 
                 # Tính tổng pixel và so sánh với cấu hình
                 if original.width * original.height > settings['max_pixels']:
-                    raise ValueError('Số pixel ảnh vượt quá giới hạn cấu hình')
+                    raise InputError(f'Ảnh {original.width}x{original.height} vượt giới hạn {settings["max_pixels"]} pixel')
 
                 # Chỉnh ảnh theo thông tin hướng lưu trong EXIF, sau đó chuyển thành RGB.
                 # Ví dụ điện thoại lưu pixel theo hướng ngang nhưng EXIF báo cần xoay để hiển thị dọc
@@ -124,7 +118,7 @@ def image_pages(source: Path, cfg: dict):
 
                 # yield ảnh RGB và metadata cho ảnh tĩnh. Metadata bao gồm số trang (1) và kích thước gốc của ảnh sau khi áp dụng EXIF.
                 try:
-                    yield image, {'page': 1, 'source_size_after_exif': source_size}
+                    yield image, {'page': 1, 'total_pages': 1, 'source_size_after_exif': source_size}
                 finally:
                     image.close()
 
@@ -136,8 +130,8 @@ class Engine:
         """
         Khởi tạo engine với cấu hình và thông tin worker.
         """
-        # Yêu cầu cơ chế auto_growth của Paddle để tránh OOM khi GPU có nhiều process. Nếu không set, Paddle có thể chiếm toàn bộ VRAM.
-        os.environ.setdefault('FLAGS_allocator_strategy', 'auto_growth')
+        # Lưu ý: FLAGS_allocator_strategy=auto_growth chỉ có tác dụng khi đặt TRƯỚC `import paddle`
+        # → supervisor đặt qua biến môi trường của tiến trình con (xem main.Supervisor._child_env).
         # Lưu cấu hình model và thông tin worker để sử dụng trong các phương thức khác.
         self.cfg, self.worker = cfg, worker
         self.torch, self.paddle = torch, paddle
@@ -153,10 +147,10 @@ class Engine:
         # Nếu GPU có sẵn và worker không yêu cầu CPU, sử dụng GPU; ngược lại, sử dụng CPU
         self.device = 'gpu' if gpu_ok and worker['device'] != 'cpu' else 'cpu'
 
-        # Giới hạn số luồng CPU cho Torch để tránh chiếm dụng toàn bộ CPU.
-        torch.set_num_threads(m['cpu_threads'])
-        # Đặt Paddle vào GPU số 0 được nhìn thấy trong process này
-        paddle.set_device('gpu:0' if self.device == 'gpu' else 'cpu')
+        # # Giới hạn số luồng CPU cho Torch để tránh chiếm dụng toàn bộ CPU.
+        # torch.set_num_threads(m['cpu_threads'])
+        # # Đặt Paddle vào GPU số 0 được nhìn thấy trong process này
+        # paddle.set_device('gpu:0' if self.device == 'gpu' else 'cpu')
 
         # Kiểm tra bộ nhớ trống trên GPU trước khi nạp model.
         self.memory_guard()

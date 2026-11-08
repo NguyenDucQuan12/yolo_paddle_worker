@@ -11,7 +11,8 @@ load_dotenv()  # Tự động tìm và nạp file .env ở thư mục hiện t�
 
 
 # Đường dẫn thư mục lưu trữ file log
-SYSTEM_LOG_DIRECTORY = os.getenv("SYSTEM_LOG_DIRECTORY", "log/system_log")
+# Mặc định: app/log/system_log (tuyệt đối, không phụ thuộc thư mục làm việc hiện tại).
+SYSTEM_LOG_DIRECTORY = os.getenv("SYSTEM_LOG_DIRECTORY") or str(Path(__file__).resolve().parents[2] / "log" / "system_log")
 
 Path(SYSTEM_LOG_DIRECTORY).mkdir(parents=True, exist_ok=True)
 
@@ -44,9 +45,23 @@ def _remove_old_logs(logs_root=SYSTEM_LOG_DIRECTORY, max_days=30):
     except Exception as e:
         system_logger.error(f"Gặp lỗi trong quá trình xóa thư mục chứa log hệ thống: {e}")
 
+# Gắn vai trò process (supervisor/gateway/worker_x) vào MỌI log record để nhiều process ghi chung
+# một file vẫn phân biệt được. Dùng record factory nên handler nào (file, console) cũng có %(role)s.
+_ROLE = os.getenv("VISION_ROLE") or os.getenv("VISION_WORKER_ID") or "supervisor"
+_base_factory = logging.getLogRecordFactory()
+
+
+def _record_factory(*args, **kwargs):
+    record = _base_factory(*args, **kwargs)
+    record.role = _ROLE
+    return record
+
+
+logging.setLogRecordFactory(_record_factory)
+
 # Formatter: Định dạng log với đầy đủ các thông tin
 _formatter = logging.Formatter(
-    '%(asctime)s %(levelname)s:\t %(filename)s - Line: %(lineno)d message: %(message)s',
+    '%(asctime)s %(levelname)s [%(role)s pid=%(process)d]:\t %(filename)s - Line: %(lineno)d message: %(message)s',
     datefmt='%d/%m/%Y %H:%M:%S %p'
 )
 
@@ -63,6 +78,11 @@ def _log_file_path(day_str=None):
 # Logger ứng dụng (Sử dụng thread để tự tạo tệp cho ngày mới)
 system_logger = logging.getLogger()
 system_logger.setLevel(logging.INFO)
+
+# Thư viện HTTP ghi INFO cho MỖI request (health check của supervisor vài giây một lần, /admin/workers...)
+# → làm rối log. Chỉ giữ WARNING trở lên (lỗi thật vẫn được ghi).
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 
 # Đảm bảo tạo file log cho ngày hiện tại

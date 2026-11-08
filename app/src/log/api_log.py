@@ -11,7 +11,8 @@ load_dotenv()  # Tự động tìm và nạp file .env ở thư mục hiện t�
 
 
 # Đường dẫn thư mục lưu trữ file log
-API_LOG_DIRECTORY = os.getenv("API_LOG_DIRECTORY", "log/api_log")
+# Mặc định: app/log/api_log (tuyệt đối, không phụ thuộc thư mục làm việc hiện tại).
+API_LOG_DIRECTORY = os.getenv("API_LOG_DIRECTORY") or str(Path(__file__).resolve().parents[2] / "log" / "api_log")
 
 # Tạo thư mục nếu chưa có
 Path(API_LOG_DIRECTORY).mkdir(parents=True, exist_ok=True)

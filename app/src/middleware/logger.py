@@ -1,7 +1,5 @@
 # middlewares/log_requests.py
 import json, time, uuid
-import asyncio
-import socket
 from typing import Dict
 
 from fastapi import Request
@@ -13,10 +11,10 @@ from log.api_log import logger
 # Các đường dẫn ít giá trị (giảm ồn). Có thể bỏ /docs,/redoc nếu bạn muốn log cả trang docs.
 EXCLUDED_PATHS = {"/redoc", "/docs", "/openapi.json", "/health", "/readyz"}
 
-HEALTH_PATHS = {"/healthz", "/readyz"}
+HEALTH_PATHS = {"/health", "/healthz", "/readyz"}
 
 # Khóa nhạy cảm cần che khi log request params/body
-SENSITIVE_KEYS = {"password", "token", "authorization", "apikey", "secret"}
+SENSITIVE_KEYS = {"password", "token", "authorization", "apikey", "api_key", "x-api-key", "secret"}
 
 # Giới hạn kích thước dữ liệu (request/response) đem đi log để tránh phình log/disk
 MAX_LOG_BYTES = 64 * 1024  # 64KB
@@ -63,17 +61,15 @@ async def log_requests(request: Request, call_next):
     path = request.url.path
     ua = request.headers.get("user-agent", "-")
     # Correlation-ID: lấy từ header nếu có, không thì tự sinh
-    cid = request.headers.get("x-request-id") or str(uuid.uuid4())
+    # Giới hạn độ dài/ký tự để client không chèn rác vào log qua header.
+    cid = (request.headers.get("x-request-id") or "")[:64].strip()
+    if not cid or not all(ch.isalnum() or ch in "-_." for ch in cid):
+        cid = str(uuid.uuid4())
 
-    # Lấy IP/hostname của client (gethostbyaddr có thể tốn thời gian nếu DNS ngược chậm)
+    # Lấy IP của client. KHÔNG tra DNS ngược (gethostbyaddr) ở đây: trên Windows/LAN lỗi DNS có thể
+    # làm mỗi request chậm thêm vài giây và chiếm thread pool. Cần hostname thì tra offline từ log.
     client_ip = get_client_ip(request= request)
-    try:
-        if path in HEALTH_PATHS or path in EXCLUDED_PATHS:
-            client_hostname = client_ip
-        else:
-            client_hostname = (await asyncio.to_thread(socket.gethostbyaddr, client_ip))[0]
-    except Exception:
-        client_hostname = "GUEST"
+    client_hostname = client_ip
 
     # Lấy query parameters và che thông tin nhạy cảm
     params = sanitize_dict(dict(request.query_params))
@@ -119,28 +115,15 @@ async def log_requests(request: Request, call_next):
 
     # Không ghi log đối với các đường dẫn health check
     if path in HEALTH_PATHS:
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = cid
+        return response
 
-    # Bỏ qua những path ít giá trị để giảm ồn (nhưng vẫn đo duration)
+    # Bỏ qua những path ít giá trị để giảm ồn
     if path in EXCLUDED_PATHS:
-        duration_ms = (time.perf_counter() - start) * 1000
-        logger.info(
-            "",
-            extra={
-                "hostname": client_hostname,
-                "ip": client_ip,
-                "api_name": path,
-                "params": "excluded_path",
-                "result": "excluded_path",
-                "method": method,
-                "status": 200,  # docs thường trả 200
-                "duration_ms": f"{duration_ms:.2f}",
-                "user_agent": ua,
-                "correlation_id": cid,
-                "request_body": "-",  # không cần log body ở các path này
-            },
-        )
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = cid
+        return response
 
     # Gọi handler thật, vẫn bọc try/except để đảm bảo LUÔN có log khi lỗi xảy ra sớm
     try:
@@ -228,12 +211,15 @@ async def log_requests(request: Request, call_next):
     )
 
     if file_name:
+        response.headers["X-Request-ID"] = cid
         return response
 
-    # Trả response FULL cho client (y hệt như handler đã tạo)
+    # Trả response FULL cho client (y hệt như handler đã tạo) + X-Request-ID để client báo lỗi kèm mã tra log.
+    headers = dict(response.headers)
+    headers["X-Request-ID"] = cid
     return Response(
         content=body,
         status_code=response.status_code,
-        headers=dict(response.headers),
+        headers=headers,
         media_type=content_type,
     )
