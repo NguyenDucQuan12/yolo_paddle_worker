@@ -1308,3 +1308,86 @@ Procedure này chỉ xóa metadata trong SQL Server. Nó không xóa ảnh gốc
 SQL transaction không tự bao phủ thao tác filesystem của Python. Cleanup cần có cơ chế xử lý lại khi xóa file hoặc xóa metadata bị gián đoạn; không nên coi hai thao tác đó là một transaction duy nhất.  
 
 # Tạo Service nhận job
+## Test gọi API có API key
+
+### 1. Bật API key
+
+Tạo key ngẫu nhiên (chạy 2 lần, mỗi lần một key):
+```powershell
+.yolo_server\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+Điền vào `app/.env` (sao chép từ `app/.env.example` nếu chưa có), rồi **khởi động lại server**:
+```ini
+VISION_API_KEY=key-cho-client
+VISION_ADMIN_KEY=key-cho-quan-tri
+```
+
+| Endpoint | Key cần gửi trong header `X-API-Key` |
+|---|---|
+| `/health`, `/healthz`, `/readyz` | Không cần |
+| `/jobs/*` trên gateway (cổng 8000) | `VISION_API_KEY` |
+| `/admin/*` trên gateway | `VISION_ADMIN_KEY` |
+| `/jobs/*` trên cổng worker (gửi thẳng vào 1 worker) | `VISION_ADMIN_KEY` |
+
+Để trống key = tắt xác thực nhóm endpoint đó (chỉ nên dùng khi dev). Sai/thiếu key → `401 Thiếu hoặc sai X-API-Key`.
+
+### 2. Script test tự động
+
+Sửa các biến ở phần `CẤU HÌNH` đầu file [samples/test_api.py](samples/test_api.py) (`BASE_URL`, `API_KEY`, `ADMIN_KEY`, `FILE_PATH`, `TASK`, `JOB_TIMEOUT_SECONDS`) rồi chạy:
+```powershell
+.yolo_server\Scripts\python.exe samples\test_api.py
+```
+Để `API_KEY`/`ADMIN_KEY` là `None` thì script tự đọc key từ `app/.env`. Script kiểm tra: thiếu key/sai key → 401, đúng key → qua; `/admin/workers`; gửi file → chờ xong → in kết quả.
+
+### 3. Swagger UI
+
+Mở `http://127.0.0.1:8000/docs` → bấm nút **Authorize** (ổ khoá) → nhập API key → **Authorize**. Mọi request thử trên trang sẽ tự gửi header `X-API-Key`.
+
+### 4. curl (PowerShell)
+
+Trong PowerShell, `curl` là alias của `Invoke-WebRequest` → phải gõ **`curl.exe`**.
+```powershell
+$KEY = "key-cho-client"
+
+# Gửi file (task: detect | ocr | analyze) → trả job_id
+curl.exe -X POST "http://127.0.0.1:8000/jobs?task=analyze" -H "X-API-Key: $KEY" -F "file=@samples/sample.png"
+
+# Trạng thái job
+curl.exe "http://127.0.0.1:8000/jobs/<job_id>" -H "X-API-Key: $KEY"
+
+# Kết quả JSON (202 nếu chưa xong)
+curl.exe "http://127.0.0.1:8000/jobs/<job_id>/result" -H "X-API-Key: $KEY"
+
+# Tải một artifact (tên lấy từ danh sách artifacts trong trạng thái job)
+curl.exe -o result.json "http://127.0.0.1:8000/jobs/<job_id>/files?name=attempt_001/result.json" -H "X-API-Key: $KEY"
+
+# Trạng thái worker (admin key)
+curl.exe "http://127.0.0.1:8000/admin/workers" -H "X-API-Key: key-cho-quan-tri"
+
+# Kiểm tra bị chặn khi thiếu key → 401
+curl.exe -i "http://127.0.0.1:8000/jobs/abc"
+```
+
+### 5. Python (httpx / requests)
+
+```python
+import httpx
+
+client = httpx.Client(base_url="http://127.0.0.1:8000", headers={"X-API-Key": "key-cho-client"}, timeout=60)
+
+with open("samples/sample.png", "rb") as f:
+    job = client.post("/jobs", params={"task": "analyze"}, files={"file": ("sample.png", f)}).json()
+
+status = client.get(f"/jobs/{job['job_id']}").json()["status"]      # queued → running → succeeded/failed
+result = client.get(f"/jobs/{job['job_id']}/result")                # 200 = có kết quả, 202 = chưa xong
+```
+
+### Mã lỗi thường gặp
+
+| Mã | Ý nghĩa | Xử lý phía client |
+|---|---|---|
+| 401 | Thiếu / sai `X-API-Key` | Kiểm tra key, khởi động lại server sau khi sửa `.env` |
+| 413 | File/body quá `max_file_mb` / `max_body_mb` | Giảm kích thước file |
+| 415 | Định dạng không hỗ trợ | Chỉ gửi ảnh hoặc PDF |
+| 503 | Hàng đợi đầy hoặc DB tạm lỗi | Thử lại sau số giây trong header `Retry-After` |
+| 507 | Server hết dung lượng đĩa | Báo quản trị |
