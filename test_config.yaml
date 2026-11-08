@@ -1,9 +1,0 @@
-# Ba script test API bên dưới đọc file này; không truyền argument.
-base_url: http://127.0.0.1:8000
-input_file: samples/sample.png     # Đổi sang ảnh/PDF thật để đo chất lượng model.
-task: analyze                     # detect / ocr / analyze.
-concurrent_clients: 4
-requests: 12
-poll_seconds: 0.5
-wait_timeout_seconds: 600
-output_dir: test_outputs

@@ -1,8 +1,5 @@
 """
 Test nhanh API có dùng API key: kiểm tra xác thực → gửi file → chờ xử lý → lấy kết quả.
-
-Cách dùng: sửa các biến trong phần CẤU HÌNH bên dưới, rồi chạy (server đang chạy):
-    .yolo_server\\Scripts\\python.exe samples\\test_api.py
 """
 import json
 import os
